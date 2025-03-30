@@ -34,7 +34,10 @@ const io = new SocketIOServer(server, {
 // Middleware
 app.use(
   cors({
-    origin: ["http://localhost:3000"], // allow requests from this origin
+    origin: [
+      "http://localhost:3000",
+      "https://noted-badly-lacewing.ngrok-free.app",
+    ], // allow requests from this origin
     credentials: true, // Allow cookies
   })
 );
