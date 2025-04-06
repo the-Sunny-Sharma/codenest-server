@@ -702,6 +702,15 @@ const io = new Server(server, {
   },
 });
 
+// Create a debug logger function that respects environment
+const debug = (namespace, message, data = null) => {
+  if (!isProduction || process.env.DEBUG === "true") {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [${namespace}] ${message}`);
+    if (data) console.log(data);
+  }
+};
+
 // Import models
 import HelpRequest from "./models/HelpRequest.js";
 import CodeSession from "./models/CodeSession.js";
