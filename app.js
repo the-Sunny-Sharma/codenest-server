@@ -658,17 +658,19 @@
 // });
 
 // export { app, server, io };
+
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import mongoose from "mongoose";
-import dotenv from "dotenv";
+import { config } from "dotenv";
 import cors from "cors";
 import helpRequestRoutes from "./routes/helpRequestRoutes.js";
 import collaborationRoutes from "./routes/collaborationRoutes.js";
 
 // Load environment variables
-dotenv.config();
+config({
+  path: "./config/config.env",
+});
 
 // Initialize Express app
 const app = express();
@@ -693,12 +695,6 @@ const io = new Server(server, {
     credentials: true,
   },
 });
-
-// MongoDB connection
-mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/codenest")
-  .then(() => console.log("MongoDB connected"))
-  .catch((err) => console.error("MongoDB connection error:", err));
 
 // Import models
 import HelpRequest from "./models/HelpRequest.js";
@@ -1376,12 +1372,6 @@ app.get("/api/code-sessions/:courseId/:chapterId", async (req, res) => {
     console.error("Error fetching code session:", error);
     res.status(500).json({ message: "Server error" });
   }
-});
-
-// Start server
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
 });
 
 export { app, server, io };
