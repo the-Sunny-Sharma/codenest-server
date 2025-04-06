@@ -9,10 +9,19 @@
 // server.listen(PORT, () => {
 //   console.log(`Server is running on port: ${PORT}`);
 // });
+
+/**
+ * CodeNest - Live Collaboration Server
+ * Server initialization file that connects to the database and starts the HTTP server
+ */
+
 import { app, server } from "./app.js";
 import { connectToDatabase } from "./lib/connectDB.js";
 
-// Connect to MongoDB - only connect once here
+/**
+ * Start the server
+ * Connects to the database and starts the HTTP server
+ */
 async function startServer() {
   try {
     // Connect to database
@@ -29,4 +38,5 @@ async function startServer() {
   }
 }
 
+//Start the server
 startServer();

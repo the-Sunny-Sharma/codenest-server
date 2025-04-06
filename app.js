@@ -659,6 +659,12 @@
 
 // export { app, server, io };
 
+// ===============================================
+/**
+ * CodeNest - Live Collaboration Server
+ * Main application file that sets up Express, Socket.IO, and defines all event
+ */
+
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -676,7 +682,7 @@ config({
 const app = express();
 const server = createServer(app);
 
-// Configure CORS
+// Configure CORS - middleware
 app.use(
   cors({
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
@@ -708,7 +714,7 @@ const studentCollaborations = new Map(); // studentId -> { teacherId, roomId }
 
 // Socket.IO connection handler
 io.on("connection", (socket) => {
-  console.log("New client connected:", socket.id);
+  debug("socket", `New client connected: ${socket.id}`);
 
   // Extract user info from query parameters
   const {
@@ -729,12 +735,23 @@ io.on("connection", (socket) => {
     avatar: userAvatar,
   };
 
-  // Join room handler
+  debug("socket:user", `User connected: ${userName} (${userRole})`, {
+    email: userEmail,
+    courseId,
+    chapterId,
+  });
+
+  /**
+   * Join room handler
+   * Creates or joins a code editing room for a specific course and chapter
+   */
   socket.on("joinRoom", async ({ room }) => {
     try {
       // Join the socket room
       socket.join(room);
       socket.data.roomId = room;
+
+      debug("socket:room", `User ${userName} joining room ${room}`);
 
       // Parse room ID to get course and chapter info
       const [roomCourseId, roomChapterId] = room.split("_");
@@ -751,6 +768,8 @@ io.on("connection", (socket) => {
 
       // Check if room exists in memory
       if (!activeRooms.has(room)) {
+        debug("socket:room", `Creating new room in memory: ${room}`);
+
         // Check if session exists in database
         let session = await CodeSession.findOne({
           courseId: roomCourseId,
@@ -758,6 +777,11 @@ io.on("connection", (socket) => {
         });
 
         if (!session) {
+          debug(
+            "socket:room",
+            `Creating new session in database for room: ${room}`
+          );
+
           // Create new session
           session = new CodeSession({
             courseId: roomCourseId,
@@ -767,6 +791,8 @@ io.on("connection", (socket) => {
           });
           await session.save();
         } else {
+          debug("socket:room", `Updating existing session for room: ${room}`);
+
           // Update existing session with new participant
           session.participants.push(participant);
           session.updatedAt = new Date();
@@ -780,6 +806,8 @@ io.on("connection", (socket) => {
           language: session.language,
         });
       } else {
+        debug("socket:room", `Adding participant to existing room: ${room}`);
+
         // Add participant to existing room
         const roomData = activeRooms.get(room);
         roomData.participants.push(participant);
@@ -808,14 +836,17 @@ io.on("connection", (socket) => {
         language: roomData.language,
       });
 
-      console.log(`User ${userName} joined room ${room}`);
+      debug("socket:room", `User ${userName} successfully joined room ${room}`);
     } catch (error) {
       console.error("Error joining room:", error);
       socket.emit("error", { message: "Failed to join room" });
     }
   });
 
-  // Code update handler
+  /**
+   * Code update handler
+   * Broadcasts code changes to all participants in the room
+   */
   socket.on("updateCode", async ({ roomId, code }) => {
     try {
       // Update code in memory
@@ -832,17 +863,25 @@ io.on("connection", (socket) => {
       // Update in database (debounced)
       clearTimeout(socket.data.codeUpdateTimeout);
       socket.data.codeUpdateTimeout = setTimeout(async () => {
-        await CodeSession.updateOne(
-          { courseId: roomCourseId, chapterId: roomChapterId },
-          { $set: { code, updatedAt: new Date() } }
-        );
+        try {
+          await CodeSession.updateOne(
+            { courseId: roomCourseId, chapterId: roomChapterId },
+            { $set: { code, updatedAt: new Date() } }
+          );
+          debug("socket:code", `Code updated in database for room: ${roomId}`);
+        } catch (dbError) {
+          console.error("Error updating code in database:", dbError);
+        }
       }, 2000); // Debounce for 2 seconds
     } catch (error) {
       console.error("Error updating code:", error);
     }
   });
 
-  // Language change handler
+  /**
+   * Language change handler
+   * Updates the programming language for the code editor
+   */
   socket.on("languageChange", async ({ roomId, language }) => {
     try {
       // Update language in memory
@@ -861,17 +900,29 @@ io.on("connection", (socket) => {
         { courseId: roomCourseId, chapterId: roomChapterId },
         { $set: { language, updatedAt: new Date() } }
       );
+
+      debug(
+        "socket:language",
+        `Language changed to ${language} in room: ${roomId}`
+      );
     } catch (error) {
       console.error("Error changing language:", error);
     }
   });
 
-  // Code output handler
+  /**
+   * Code output handler
+   * Shares code execution results with all participants
+   */
   socket.on("codeOutput", ({ roomId, output }) => {
     socket.to(roomId).emit("codeOutput", { output });
+    debug("socket:output", `Code output shared in room: ${roomId}`);
   });
 
-  // Help request handler
+  /**
+   * Help request handler
+   * Creates a help request when a student needs assistance
+   */
   socket.on(
     "requestHelp",
     async ({
@@ -888,17 +939,19 @@ io.on("connection", (socket) => {
 
         // Check if student is already in a collaboration
         if (studentCollaborations.has(studentEmail)) {
+          debug(
+            "socket:help",
+            `Help request rejected - student already in collaboration: ${studentEmail}`
+          );
           return socket.emit("error", {
             message:
               "You are already in an active collaboration. Please end it before requesting new help.",
           });
         }
 
-        console.log("Help request received:", {
+        debug("socket:help", `Help request received from ${studentName}`, {
           courseId: roomCourseId,
           chapterId: roomChapterId,
-          studentName,
-          studentEmail,
           message,
         });
 
@@ -932,6 +985,11 @@ io.on("connection", (socket) => {
             (p) => p.role === "instructor"
           );
 
+          debug(
+            "socket:help",
+            `Notifying ${instructors.length} instructors about help request`
+          );
+
           // Notify instructors about help request
           instructors.forEach((instructor) => {
             io.to(instructor.socketId).emit("helpRequest", {
@@ -956,7 +1014,10 @@ io.on("connection", (socket) => {
           status: "pending",
         });
 
-        console.log(`Help request created by ${studentName} in room ${roomId}`);
+        debug(
+          "socket:help",
+          `Help request created by ${studentName} in room ${roomId}`
+        );
       } catch (error) {
         console.error("Error creating help request:", error);
         socket.emit("error", { message: "Failed to create help request" });
@@ -964,7 +1025,10 @@ io.on("connection", (socket) => {
     }
   );
 
-  // Help response handler - UPDATED to handle collaboration
+  /**
+   * Help response handler
+   * Handles instructor responses to help requests
+   */
   socket.on(
     "helpResponse",
     async ({ helpRequestId, studentSocketId, studentEmail, status }) => {
@@ -973,6 +1037,7 @@ io.on("connection", (socket) => {
         const helpRequest = await HelpRequest.findById(helpRequestId);
 
         if (!helpRequest) {
+          debug("socket:help", `Help request not found: ${helpRequestId}`);
           return socket.emit("error", { message: "Help request not found" });
         }
 
@@ -984,6 +1049,15 @@ io.on("connection", (socket) => {
           // Get current collaboration
           const currentCollab = activeCollaborations.get(
             socket.data.user.email
+          );
+
+          debug(
+            "socket:help",
+            `Teacher ending existing collaboration to help new student`,
+            {
+              currentStudent: currentCollab.studentEmail,
+              newStudent: studentEmail,
+            }
           );
 
           // Notify current student that teacher is ending collaboration to help someone else
@@ -1002,7 +1076,8 @@ io.on("connection", (socket) => {
           studentCollaborations.delete(currentCollab.studentEmail);
           activeCollaborations.delete(socket.data.user.email);
 
-          console.log(
+          debug(
+            "socket:help",
             `Ended existing collaboration with ${currentCollab.studentEmail} to help ${studentEmail}`
           );
         }
@@ -1021,10 +1096,20 @@ io.on("connection", (socket) => {
           teacherName: socket.data.user.name,
         });
 
+        debug(
+          "socket:help",
+          `Help request ${helpRequestId} ${status} by ${socket.data.user.name}`
+        );
+
         // If accepted, create a collaboration
         if (status === "accepted") {
           // Create collaboration room ID
           const collaborationRoomId = `collab_${helpRequestId}`;
+
+          debug(
+            "socket:collab",
+            `Creating new collaboration between ${socket.data.user.name} and ${helpRequest.studentName}`
+          );
 
           // Create collaboration in database
           const collaboration = new Collaboration({
@@ -1089,14 +1174,11 @@ io.on("connection", (socket) => {
             language: helpRequest.language,
           });
 
-          console.log(
+          debug(
+            "socket:collab",
             `Collaboration started between ${socket.data.user.name} and ${helpRequest.studentName}`
           );
         }
-
-        console.log(
-          `Help request ${helpRequestId} ${status} by ${socket.data.user.name}`
-        );
       } catch (error) {
         console.error("Error responding to help request:", error);
         socket.emit("error", { message: "Failed to respond to help request" });
@@ -1104,12 +1186,16 @@ io.on("connection", (socket) => {
     }
   );
 
-  // NEW: End collaboration handler
+  /**
+   * End collaboration handler
+   * Ends an active collaboration between student and teacher
+   */
   socket.on("endCollaboration", async ({ collaborationId, reason }) => {
     try {
       const collaboration = await Collaboration.findById(collaborationId);
 
       if (!collaboration) {
+        debug("socket:collab", `Collaboration not found: ${collaborationId}`);
         return socket.emit("error", { message: "Collaboration not found" });
       }
 
@@ -1118,6 +1204,10 @@ io.on("connection", (socket) => {
       const isStudent = collaboration.studentEmail === socket.data.user.email;
 
       if (!isTeacher && !isStudent) {
+        debug(
+          "socket:collab",
+          `User not part of collaboration: ${socket.data.user.email}`
+        );
         return socket.emit("error", {
           message: "You are not part of this collaboration",
         });
@@ -1149,7 +1239,8 @@ io.on("connection", (socket) => {
       // Leave the room
       socket.leave(roomId);
 
-      console.log(
+      debug(
+        "socket:collab",
         `Collaboration ${collaborationId} ended by ${
           isTeacher ? "teacher" : "student"
         }`
@@ -1160,7 +1251,10 @@ io.on("connection", (socket) => {
     }
   });
 
-  // NEW: Collaboration code update handler
+  /**
+   * Collaboration code update handler
+   * Handles code updates during a collaboration session
+   */
   socket.on(
     "collaborationCodeUpdate",
     async ({ collaborationId, code, language }) => {
@@ -1170,6 +1264,10 @@ io.on("connection", (socket) => {
         const isStudent = studentCollaborations.has(socket.data.user.email);
 
         if (!isTeacher && !isStudent) {
+          debug(
+            "socket:collab",
+            `User not in active collaboration: ${socket.data.user.email}`
+          );
           return socket.emit("error", {
             message: "You are not in an active collaboration",
           });
@@ -1198,7 +1296,8 @@ io.on("connection", (socket) => {
           },
         });
 
-        console.log(
+        debug(
+          "socket:collab",
           `Collaboration code updated by ${author} in room ${roomId}`
         );
       } catch (error) {
@@ -1208,7 +1307,10 @@ io.on("connection", (socket) => {
     }
   );
 
-  // NEW: Join teacher's channel
+  /**
+   * Join teacher's channel
+   * Allows a teacher to join their notification channel
+   */
   socket.on("join-teacher-channel", async (data) => {
     const { teacherId, courseId } = data;
 
@@ -1218,14 +1320,20 @@ io.on("connection", (socket) => {
       socket.data.teacherId = teacherId;
       socket.data.role = "teacher";
 
-      console.log(`Teacher ${teacherId} joined channel teacher:${teacherId}`);
+      debug(
+        "socket:channel",
+        `Teacher ${teacherId} joined channel teacher:${teacherId}`
+      );
     } catch (error) {
       console.error("Error joining teacher channel:", error);
       socket.emit("error", { message: "Failed to join teacher channel" });
     }
   });
 
-  // NEW: Join student's channel
+  /**
+   * Join student's channel
+   * Allows a student to join their notification channel
+   */
   socket.on("join-student-channel", async (data) => {
     const { studentId, courseId } = data;
 
@@ -1235,18 +1343,30 @@ io.on("connection", (socket) => {
       socket.data.studentId = studentId;
       socket.data.role = "student";
 
-      console.log(`Student ${studentId} joined channel student:${studentId}`);
+      debug(
+        "socket:channel",
+        `Student ${studentId} joined channel student:${studentId}`
+      );
     } catch (error) {
       console.error("Error joining student channel:", error);
       socket.emit("error", { message: "Failed to join student channel" });
     }
   });
 
-  // Disconnect handler
+  /**
+   * Disconnect handler
+   * Cleans up when a user disconnects
+   */
   socket.on("disconnect", async () => {
     try {
       const { roomId } = socket.data;
       const userEmail = socket.data.user?.email;
+      const userName = socket.data.user?.name;
+
+      debug(
+        "socket",
+        `Client disconnected: ${socket.id} (${userName || "Unknown"})`
+      );
 
       // Handle regular room disconnection
       if (roomId && activeRooms.has(roomId)) {
@@ -1268,7 +1388,7 @@ io.on("connection", (socket) => {
             participantRole: participant.role,
           });
 
-          console.log(`User ${participant.name} left room ${roomId}`);
+          debug("socket:room", `User ${participant.name} left room ${roomId}`);
 
           // Parse room ID
           const [roomCourseId, roomChapterId] = roomId.split("_");
@@ -1285,6 +1405,7 @@ io.on("connection", (socket) => {
           // If room is empty, remove from memory
           if (roomData.participants.length === 0) {
             activeRooms.delete(roomId);
+            debug("socket:room", `Room ${roomId} removed (empty)`);
           }
         }
       }
@@ -1294,6 +1415,11 @@ io.on("connection", (socket) => {
         // Check if user is a teacher in a collaboration
         if (activeCollaborations.has(userEmail)) {
           const collab = activeCollaborations.get(userEmail);
+
+          debug(
+            "socket:collab",
+            `Teacher ${userEmail} disconnected from collaboration with ${collab.studentEmail}`
+          );
 
           // Notify student that teacher disconnected
           io.to(collab.studentSocketId).emit("collaborationEnded", {
@@ -1310,15 +1436,16 @@ io.on("connection", (socket) => {
           // Remove from active collaborations
           studentCollaborations.delete(collab.studentEmail);
           activeCollaborations.delete(userEmail);
-
-          console.log(
-            `Teacher ${userEmail} disconnected, ending collaboration with ${collab.studentEmail}`
-          );
         }
 
         // Check if user is a student in a collaboration
         if (studentCollaborations.has(userEmail)) {
           const collab = studentCollaborations.get(userEmail);
+
+          debug(
+            "socket:collab",
+            `Student ${userEmail} disconnected from collaboration with ${collab.teacherEmail}`
+          );
 
           // Notify teacher that student disconnected
           io.to(collab.teacherSocketId).emit("collaborationEnded", {
@@ -1335,19 +1462,679 @@ io.on("connection", (socket) => {
           // Remove from active collaborations
           activeCollaborations.delete(collab.teacherEmail);
           studentCollaborations.delete(userEmail);
-
-          console.log(
-            `Student ${userEmail} disconnected, ending collaboration with ${collab.teacherEmail}`
-          );
         }
       }
     } catch (error) {
       console.error("Error handling disconnect:", error);
     }
-
-    console.log("Client disconnected:", socket.id);
   });
 });
+
+// io.on("connection", (socket) => {
+//   debug("socket", `New client connected: ${socket.id}`);
+//   // console.log("New client connected:", socket.id);
+
+//   // Extract user info from query parameters
+//   const {
+//     courseId,
+//     chapterId,
+//     sectionOrder,
+//     userName,
+//     userEmail,
+//     userRole,
+//     userAvatar,
+//   } = socket.handshake.query;
+
+//   // Store user data in socket
+//   socket.data.user = {
+//     name: userName,
+//     email: userEmail,
+//     role: userRole,
+//     avatar: userAvatar,
+//   };
+
+//   debug("socket:user", `User connected: ${userName} (${userRole})`, {
+//     email: userEmail,
+//     courseId,
+//     chapterId,
+//   });
+
+//   /**
+//    * Join room handler
+//    * Creates or joins a code editing room for a specific course and chapter
+//    */
+//   socket.on("joinRoom", async ({ room }) => {
+//     try {
+//       // Join the socket room
+//       socket.join(room);
+//       socket.data.roomId = room;
+
+//       debug("socket:room", `User ${userName} joining room ${room}`);
+
+//       // Parse room ID to get course and chapter info
+//       const [roomCourseId, roomChapterId] = room.split("_");
+
+//       // Create participant object
+//       const participant = {
+//         userId: socket.id,
+//         name: userName,
+//         email: userEmail,
+//         avatar: userAvatar,
+//         role: userRole,
+//         socketId: socket.id,
+//       };
+
+//       // Check if room exists in memory
+//       if (!activeRooms.has(room)) {
+//         debug("socket:room", `Creating new room in memory: ${room}`);
+
+//         // Check if session exists in database
+//         let session = await CodeSession.findOne({
+//           courseId: roomCourseId,
+//           chapterId: roomChapterId,
+//         });
+
+//         if (!session) {
+//           debug("socket:room", `Creating new session in database for room: ${room}`);
+
+//           // Create new session
+//           session = new CodeSession({
+//             courseId: roomCourseId,
+//             chapterId: roomChapterId,
+//             sectionOrder,
+//             participants: [participant],
+//           });
+//           await session.save();
+//         } else {
+//           debug("socket:room", `Updating existing session for room: ${room}`);
+
+//           // Update existing session with new participant
+//           session.participants.push(participant);
+//           session.updatedAt = new Date();
+//           await session.save();
+//         }
+
+//         // Store session in memory
+//         activeRooms.set(room, {
+//           participants: [participant],
+//           code: session.code,
+//           language: session.language,
+//         });
+//       } else {
+//         debug("socket:room", `Adding participant to existing room: ${room}`);
+
+//         // Add participant to existing room
+//         const roomData = activeRooms.get(room);
+//         roomData.participants.push(participant);
+
+//         // Update database
+//         await CodeSession.updateOne(
+//           { courseId: roomCourseId, chapterId: roomChapterId },
+//           {
+//             $push: { participants: participant },
+//             $set: { updatedAt: new Date() },
+//           }
+//         );
+//       }
+
+//       // Get current room data
+//       const roomData = activeRooms.get(room);
+
+//       // Notify room about new participant
+//       socket.to(room).emit("participantJoined", { participant });
+
+//       // Send room data to the new participant
+//       socket.emit("roomJoined", {
+//         room,
+//         participants: roomData.participants,
+//         code: roomData.code,
+//         language: roomData.language,
+//       });
+
+//       // console.log(`User ${userName} joined room ${room}`);
+//       debug("socket:room", `User ${userName} successfully joined room ${room}`);
+//     } catch (error) {
+//       console.error("Error joining room:", error);
+//       socket.emit("error", { message: "Failed to join room" });
+//     }
+//   });
+
+//   /**
+//    * Code update handler
+//    * Broadcasts code changes to all participants in the room
+//    */
+//   socket.on("updateCode", async ({ roomId, code }) => {
+//     try {
+//       // Update code in memory
+//       if (activeRooms.has(roomId)) {
+//         activeRooms.get(roomId).code = code;
+//       }
+
+//       // Broadcast to room
+//       socket.to(roomId).emit("codeUpdate", { code });
+
+//       // Parse room ID
+//       const [roomCourseId, roomChapterId] = roomId.split("_");
+
+//       // Update in database (debounced)
+//       clearTimeout(socket.data.codeUpdateTimeout);
+//       socket.data.codeUpdateTimeout = setTimeout(async () => {
+//         await CodeSession.updateOne(
+//           { courseId: roomCourseId, chapterId: roomChapterId },
+//           { $set: { code, updatedAt: new Date() } }
+//         );
+//       }, 2000); // Debounce for 2 seconds
+//     } catch (error) {
+//       console.error("Error updating code:", error);
+//     }
+//   });
+
+//   // Language change handler
+//   socket.on("languageChange", async ({ roomId, language }) => {
+//     try {
+//       // Update language in memory
+//       if (activeRooms.has(roomId)) {
+//         activeRooms.get(roomId).language = language;
+//       }
+
+//       // Broadcast to room
+//       socket.to(roomId).emit("languageChange", { language });
+
+//       // Parse room ID
+//       const [roomCourseId, roomChapterId] = roomId.split("_");
+
+//       // Update in database
+//       await CodeSession.updateOne(
+//         { courseId: roomCourseId, chapterId: roomChapterId },
+//         { $set: { language, updatedAt: new Date() } }
+//       );
+//     } catch (error) {
+//       console.error("Error changing language:", error);
+//     }
+//   });
+
+//   // Code output handler
+//   socket.on("codeOutput", ({ roomId, output }) => {
+//     socket.to(roomId).emit("codeOutput", { output });
+//   });
+
+//   // Help request handler
+//   socket.on(
+//     "requestHelp",
+//     async ({
+//       roomId,
+//       studentName,
+//       studentEmail,
+//       studentAvatar,
+//       code,
+//       language,
+//       message,
+//     }) => {
+//       try {
+//         const [roomCourseId, roomChapterId] = roomId.split("_");
+
+//         // Check if student is already in a collaboration
+//         if (studentCollaborations.has(studentEmail)) {
+//           return socket.emit("error", {
+//             message:
+//               "You are already in an active collaboration. Please end it before requesting new help.",
+//           });
+//         }
+
+//         console.log("Help request received:", {
+//           courseId: roomCourseId,
+//           chapterId: roomChapterId,
+//           studentName,
+//           studentEmail,
+//           message,
+//         });
+
+//         // Create help request in database
+//         const helpRequest = new HelpRequest({
+//           courseId: roomCourseId,
+//           chapterId: roomChapterId,
+//           sectionOrder,
+//           studentId: socket.id,
+//           studentName,
+//           studentEmail,
+//           studentAvatar,
+//           code,
+//           language,
+//           message,
+//           codeVersions: [
+//             {
+//               code,
+//               timestamp: new Date(),
+//               author: "student",
+//             },
+//           ],
+//         });
+
+//         await helpRequest.save();
+
+//         // Find instructors in the room
+//         const roomData = activeRooms.get(roomId);
+//         if (roomData) {
+//           const instructors = roomData.participants.filter(
+//             (p) => p.role === "instructor"
+//           );
+
+//           // Notify instructors about help request
+//           instructors.forEach((instructor) => {
+//             io.to(instructor.socketId).emit("helpRequest", {
+//               helpRequestId: helpRequest._id,
+//               studentName,
+//               studentEmail,
+//               studentAvatar,
+//               code,
+//               language,
+//               message,
+//               roomId,
+//               preview:
+//                 code.substring(0, 100) + (code.length > 100 ? "..." : ""),
+//               timestamp: helpRequest.createdAt,
+//             });
+//           });
+//         }
+
+//         // Notify student that request was sent
+//         socket.emit("helpRequestSent", {
+//           helpRequestId: helpRequest._id,
+//           status: "pending",
+//         });
+
+//         console.log(`Help request created by ${studentName} in room ${roomId}`);
+//       } catch (error) {
+//         console.error("Error creating help request:", error);
+//         socket.emit("error", { message: "Failed to create help request" });
+//       }
+//     }
+//   );
+
+//   // Help response handler - UPDATED to handle collaboration
+//   socket.on(
+//     "helpResponse",
+//     async ({ helpRequestId, studentSocketId, studentEmail, status }) => {
+//       try {
+//         // Update help request in database
+//         const helpRequest = await HelpRequest.findById(helpRequestId);
+
+//         if (!helpRequest) {
+//           return socket.emit("error", { message: "Help request not found" });
+//         }
+
+//         // Check if teacher is already in a collaboration
+//         if (
+//           activeCollaborations.has(socket.data.user.email) &&
+//           status === "accepted"
+//         ) {
+//           // Get current collaboration
+//           const currentCollab = activeCollaborations.get(
+//             socket.data.user.email
+//           );
+
+//           // Notify current student that teacher is ending collaboration to help someone else
+//           io.to(currentCollab.studentSocketId).emit("collaborationEnded", {
+//             reason: "teacher_switched",
+//             message: `${socket.data.user.name} has ended this collaboration to help another student.`,
+//           });
+
+//           // End current collaboration in database
+//           await Collaboration.findByIdAndUpdate(currentCollab.collaborationId, {
+//             status: "terminated",
+//             endedAt: new Date(),
+//           });
+
+//           // Remove from active collaborations
+//           studentCollaborations.delete(currentCollab.studentEmail);
+//           activeCollaborations.delete(socket.data.user.email);
+
+//           console.log(
+//             `Ended existing collaboration with ${currentCollab.studentEmail} to help ${studentEmail}`
+//           );
+//         }
+
+//         helpRequest.status = status;
+//         helpRequest.teacherId = socket.id;
+//         helpRequest.teacherName = socket.data.user.name;
+//         helpRequest.updatedAt = new Date();
+
+//         await helpRequest.save();
+
+//         // Notify student
+//         io.to(studentSocketId).emit("helpRequestResponse", {
+//           helpRequestId,
+//           status,
+//           teacherName: socket.data.user.name,
+//         });
+
+//         // If accepted, create a collaboration
+//         if (status === "accepted") {
+//           // Create collaboration room ID
+//           const collaborationRoomId = `collab_${helpRequestId}`;
+
+//           // Create collaboration in database
+//           const collaboration = new Collaboration({
+//             courseId: helpRequest.courseId,
+//             chapterId: helpRequest.chapterId,
+//             sectionOrder: helpRequest.sectionOrder,
+//             teacherId: socket.data.user.email,
+//             teacherName: socket.data.user.name,
+//             teacherEmail: socket.data.user.email,
+//             teacherSocketId: socket.id,
+//             studentId: helpRequest.studentId,
+//             studentName: helpRequest.studentName,
+//             studentEmail: helpRequest.studentEmail,
+//             studentSocketId: studentSocketId,
+//             helpRequestId: helpRequestId,
+//             codeVersions: [
+//               {
+//                 code: helpRequest.code,
+//                 language: helpRequest.language,
+//                 timestamp: new Date(),
+//                 author: "student",
+//               },
+//             ],
+//           });
+
+//           await collaboration.save();
+
+//           // Track active collaborations
+//           activeCollaborations.set(socket.data.user.email, {
+//             studentEmail: helpRequest.studentEmail,
+//             studentSocketId: studentSocketId,
+//             collaborationId: collaboration._id,
+//             roomId: collaborationRoomId,
+//           });
+
+//           studentCollaborations.set(helpRequest.studentEmail, {
+//             teacherEmail: socket.data.user.email,
+//             teacherSocketId: socket.id,
+//             collaborationId: collaboration._id,
+//             roomId: collaborationRoomId,
+//           });
+
+//           // Join both users to the collaboration room
+//           socket.join(collaborationRoomId);
+//           io.sockets.sockets.get(studentSocketId)?.join(collaborationRoomId);
+
+//           // Notify both users about the collaboration
+//           io.to(collaborationRoomId).emit("collaborationStarted", {
+//             collaborationId: collaboration._id,
+//             roomId: collaborationRoomId,
+//             teacher: {
+//               name: socket.data.user.name,
+//               email: socket.data.user.email,
+//               socketId: socket.id,
+//             },
+//             student: {
+//               name: helpRequest.studentName,
+//               email: helpRequest.studentEmail,
+//               socketId: studentSocketId,
+//             },
+//             initialCode: helpRequest.code,
+//             language: helpRequest.language,
+//           });
+
+//           console.log(
+//             `Collaboration started between ${socket.data.user.name} and ${helpRequest.studentName}`
+//           );
+//         }
+
+//         console.log(
+//           `Help request ${helpRequestId} ${status} by ${socket.data.user.name}`
+//         );
+//       } catch (error) {
+//         console.error("Error responding to help request:", error);
+//         socket.emit("error", { message: "Failed to respond to help request" });
+//       }
+//     }
+//   );
+
+//   // NEW: End collaboration handler
+//   socket.on("endCollaboration", async ({ collaborationId, reason }) => {
+//     try {
+//       const collaboration = await Collaboration.findById(collaborationId);
+
+//       if (!collaboration) {
+//         return socket.emit("error", { message: "Collaboration not found" });
+//       }
+
+//       // Check if user is part of this collaboration
+//       const isTeacher = collaboration.teacherEmail === socket.data.user.email;
+//       const isStudent = collaboration.studentEmail === socket.data.user.email;
+
+//       if (!isTeacher && !isStudent) {
+//         return socket.emit("error", {
+//           message: "You are not part of this collaboration",
+//         });
+//       }
+
+//       // Update collaboration status
+//       collaboration.status = "ended";
+//       collaboration.endedAt = new Date();
+//       await collaboration.save();
+
+//       // Remove from active collaborations
+//       if (isTeacher) {
+//         activeCollaborations.delete(collaboration.teacherEmail);
+//         studentCollaborations.delete(collaboration.studentEmail);
+//       } else {
+//         activeCollaborations.delete(collaboration.teacherEmail);
+//         studentCollaborations.delete(collaboration.studentEmail);
+//       }
+
+//       // Notify both users
+//       const roomId = `collab_${collaboration._id}`;
+//       io.to(roomId).emit("collaborationEnded", {
+//         collaborationId,
+//         endedBy: isTeacher ? "teacher" : "student",
+//         reason: reason || "user_ended",
+//         message: `Collaboration ended by ${isTeacher ? "teacher" : "student"}`,
+//       });
+
+//       // Leave the room
+//       socket.leave(roomId);
+
+//       console.log(
+//         `Collaboration ${collaborationId} ended by ${
+//           isTeacher ? "teacher" : "student"
+//         }`
+//       );
+//     } catch (error) {
+//       console.error("Error ending collaboration:", error);
+//       socket.emit("error", { message: "Failed to end collaboration" });
+//     }
+//   });
+
+//   // NEW: Collaboration code update handler
+//   socket.on(
+//     "collaborationCodeUpdate",
+//     async ({ collaborationId, code, language }) => {
+//       try {
+//         // Determine if user is teacher or student
+//         const isTeacher = activeCollaborations.has(socket.data.user.email);
+//         const isStudent = studentCollaborations.has(socket.data.user.email);
+
+//         if (!isTeacher && !isStudent) {
+//           return socket.emit("error", {
+//             message: "You are not in an active collaboration",
+//           });
+//         }
+
+//         const roomId = `collab_${collaborationId}`;
+//         const author = isTeacher ? "teacher" : "student";
+
+//         // Broadcast code update to the collaboration room
+//         socket.to(roomId).emit("collaborationCodeUpdate", {
+//           code,
+//           language,
+//           author,
+//           timestamp: new Date(),
+//         });
+
+//         // Save code version to database
+//         await Collaboration.findByIdAndUpdate(collaborationId, {
+//           $push: {
+//             codeVersions: {
+//               code,
+//               language,
+//               timestamp: new Date(),
+//               author,
+//             },
+//           },
+//         });
+
+//         console.log(
+//           `Collaboration code updated by ${author} in room ${roomId}`
+//         );
+//       } catch (error) {
+//         console.error("Error updating collaboration code:", error);
+//         socket.emit("error", { message: "Failed to update code" });
+//       }
+//     }
+//   );
+
+//   // NEW: Join teacher's channel
+//   socket.on("join-teacher-channel", async (data) => {
+//     const { teacherId, courseId } = data;
+
+//     try {
+//       // Join the teacher's channel
+//       socket.join(`teacher:${teacherId}`);
+//       socket.data.teacherId = teacherId;
+//       socket.data.role = "teacher";
+
+//       console.log(`Teacher ${teacherId} joined channel teacher:${teacherId}`);
+//     } catch (error) {
+//       console.error("Error joining teacher channel:", error);
+//       socket.emit("error", { message: "Failed to join teacher channel" });
+//     }
+//   });
+
+//   // NEW: Join student's channel
+//   socket.on("join-student-channel", async (data) => {
+//     const { studentId, courseId } = data;
+
+//     try {
+//       // Join the student's channel
+//       socket.join(`student:${studentId}`);
+//       socket.data.studentId = studentId;
+//       socket.data.role = "student";
+
+//       console.log(`Student ${studentId} joined channel student:${studentId}`);
+//     } catch (error) {
+//       console.error("Error joining student channel:", error);
+//       socket.emit("error", { message: "Failed to join student channel" });
+//     }
+//   });
+
+//   // Disconnect handler
+//   socket.on("disconnect", async () => {
+//     try {
+//       const { roomId } = socket.data;
+//       const userEmail = socket.data.user?.email;
+
+//       // Handle regular room disconnection
+//       if (roomId && activeRooms.has(roomId)) {
+//         const roomData = activeRooms.get(roomId);
+
+//         // Remove participant from room
+//         const participantIndex = roomData.participants.findIndex(
+//           (p) => p.socketId === socket.id
+//         );
+
+//         if (participantIndex !== -1) {
+//           const participant = roomData.participants[participantIndex];
+//           roomData.participants.splice(participantIndex, 1);
+
+//           // Notify room about participant leaving
+//           socket.to(roomId).emit("participantLeft", {
+//             participantId: socket.id,
+//             participantName: participant.name,
+//             participantRole: participant.role,
+//           });
+
+//           console.log(`User ${participant.name} left room ${roomId}`);
+
+//           // Parse room ID
+//           const [roomCourseId, roomChapterId] = roomId.split("_");
+
+//           // Update database
+//           await CodeSession.updateOne(
+//             { courseId: roomCourseId, chapterId: roomChapterId },
+//             {
+//               $pull: { participants: { socketId: socket.id } },
+//               $set: { updatedAt: new Date() },
+//             }
+//           );
+
+//           // If room is empty, remove from memory
+//           if (roomData.participants.length === 0) {
+//             activeRooms.delete(roomId);
+//           }
+//         }
+//       }
+
+//       // Handle collaboration disconnection
+//       if (userEmail) {
+//         // Check if user is a teacher in a collaboration
+//         if (activeCollaborations.has(userEmail)) {
+//           const collab = activeCollaborations.get(userEmail);
+
+//           // Notify student that teacher disconnected
+//           io.to(collab.studentSocketId).emit("collaborationEnded", {
+//             reason: "teacher_disconnected",
+//             message: "The teacher has disconnected. Collaboration ended.",
+//           });
+
+//           // Update collaboration in database
+//           await Collaboration.findByIdAndUpdate(collab.collaborationId, {
+//             status: "terminated",
+//             endedAt: new Date(),
+//           });
+
+//           // Remove from active collaborations
+//           studentCollaborations.delete(collab.studentEmail);
+//           activeCollaborations.delete(userEmail);
+
+//           console.log(
+//             `Teacher ${userEmail} disconnected, ending collaboration with ${collab.studentEmail}`
+//           );
+//         }
+
+//         // Check if user is a student in a collaboration
+//         if (studentCollaborations.has(userEmail)) {
+//           const collab = studentCollaborations.get(userEmail);
+
+//           // Notify teacher that student disconnected
+//           io.to(collab.teacherSocketId).emit("collaborationEnded", {
+//             reason: "student_disconnected",
+//             message: "The student has disconnected. Collaboration ended.",
+//           });
+
+//           // Update collaboration in database
+//           await Collaboration.findByIdAndUpdate(collab.collaborationId, {
+//             status: "terminated",
+//             endedAt: new Date(),
+//           });
+
+//           // Remove from active collaborations
+//           activeCollaborations.delete(collab.teacherEmail);
+//           studentCollaborations.delete(userEmail);
+
+//           console.log(
+//             `Student ${userEmail} disconnected, ending collaboration with ${collab.teacherEmail}`
+//           );
+//         }
+//       }
+//     } catch (error) {
+//       console.error("Error handling disconnect:", error);
+//     }
+
+//     console.log("Client disconnected:", socket.id);
+//   });
+// });
 
 // Use routes
 app.use("/api", helpRequestRoutes);
