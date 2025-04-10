@@ -682,6 +682,10 @@ config({
 const app = express();
 const server = createServer(app);
 
+// Environment variables
+const NODE_ENV = process.env.NODE_ENV || "development";
+const isProduction = NODE_ENV === "production";
+
 // Configure CORS - middleware
 app.use(
   cors({
